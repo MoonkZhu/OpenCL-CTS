@@ -115,6 +115,31 @@ of which must be included alongside a filled in
 Utility script [run_conformance.py](test_conformance/run_conformance.py) can be
 used to help generating the submission log, although it is not required.
 
+### Using `run_conformance.py`
+
+The `run_conformance.py` script automatically utilizes your system's maximum hardware potential by running tests concurrently using all available CPU cores.
+
+**Key Features**:
+1. **Parallel Execution**: By default, it spawns thread pool workers matching your system's CPU core count (`os.cpu_count()`), optimizing for up to 100% machine utilization without requiring additional arguments. Output logging is cached to temporary files and serialized upon completion so that terminal output and the log remain readable despite concurrent execution.
+2. **Safe Interruption Mechanism**: If you interrupt execution (e.g., via `Ctrl+C`), the script will automatically and safely kill all running test threads immediately without requesting a manual confirmation (`y/n`). The script will gracefully wrap up the partial outputs collected so far into the main test log before exiting to avoid data loss.
+
+**Usage Examples**:
+
+Run all tests from a `.csv` file:
+```sh
+python test_conformance/run_conformance.py test_conformance/opencl_conformance_tests_full.csv
+```
+
+Run tests on a specific device type:
+```sh
+python test_conformance/run_conformance.py test_conformance/opencl_conformance_tests_full.csv CL_DEVICE_TYPE_GPU
+```
+
+Run subset of tests matching partial names:
+```sh
+python test_conformance/run_conformance.py test_conformance/opencl_conformance_tests_full.csv basic math
+```
+
 Git [tags](https://github.com/KhronosGroup/OpenCL-CTS/tags) are used to define
 the version of the repository conformance submissions are made against.
 

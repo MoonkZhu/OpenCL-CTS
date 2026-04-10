@@ -61,7 +61,7 @@ def get_tests(filename, devices_to_test):
         comment = re.search("^#.*", line)
         if comment:
             continue
-        device_specific_match = re.search("^\s*(.+?)\s*,\s*(.+?)\s*,\s*(.+?)\s*$", line)
+        device_specific_match = re.search(r"^\s*(.+?)\s*,\s*(.+?)\s*,\s*(.+?)\s*$", line)
         if device_specific_match:
             if device_specific_match.group(1) in devices_to_test:
                 test_path = str.replace(device_specific_match.group(3), '/', os.sep)
@@ -70,7 +70,7 @@ def get_tests(filename, devices_to_test):
             else:
                 print("Skipping " + device_specific_match.group(2) + " because " + device_specific_match.group(1) + " is not in the list of devices to test.")
             continue
-        match = re.search("^\s*(.+?)\s*,\s*(.+?)\s*$", line)
+        match = re.search(r"^\s*(.+?)\s*,\s*(.+?)\s*$", line)
         if match:
             test_path = str.replace(match.group(2), '/', os.sep)
             test_name = str.replace(match.group(1), '/', os.sep)
@@ -78,205 +78,164 @@ def get_tests(filename, devices_to_test):
     return tests
 
 
-def run_test_checking_output(current_directory, test_dir, log_file):
-    global process_pid, seconds_between_status_updates
+def run_test_checking_output(current_directory, test_dir, output_fd, output_name, abort_event):
     failures_this_run = 0
-    start_time = time.time()
-    # Create a temporary file for capturing the output from the test
-    (output_fd, output_name) = tempfile.mkstemp()
-    if not os.path.exists(output_name):
-        write_screen_log("\n           ==> ERROR: could not create temporary file %s ." % output_name)
-        os.close(output_fd)
-        return -1
     # Execute the test
     program_to_run = test_dir_without_args = test_dir.split(None, 1)[0]
     if os.sep == '\\':
         program_to_run += ".exe"
-    if os.path.exists(current_directory + os.sep + program_to_run):
-        os.chdir(os.path.dirname(current_directory + os.sep + test_dir_without_args))
-        try:
-            if DEBUG: p = subprocess.Popen("", stderr=subprocess.STDOUT, stdout=subprocess.PIPE, shell=True)
-            else: p = subprocess.Popen(current_directory + os.sep + test_dir, stderr=output_fd, stdout=output_fd, shell=True)
-        except OSError:
-            write_screen_log("\n           ==> ERROR: failed to execute test. Failing test. : " + str(OSError))
-            os.close(output_fd)
-            return -1
-    else:
-        write_screen_log("\n           ==> ERROR: test file (" + current_directory + os.sep + program_to_run + ") does not exist.  Failing test.")
-        os.close(output_fd)
-        return -1
-    # Set the global pid so we can kill it if this is aborted
-    process_pid = p.pid
-    # Read one character at a time from the temporary output file while the process is running.
-    # When we get an end-of-line, look for errors and write the results to the log file.
-    # This allows us to process the file as it is being produced.
-    # Keep track of the state for reading
-    # Whether we are done, if we have more to read, and where in the file we last read
-    done = False
-    more_to_read = True
-    pointer = 0
-    pointer_at_last_user_update = 0
-    output_this_run = False
-    try:
-        read_output = open(output_name, 'r')
-    except IOError:
-        write_screen_log("\n           ==> ERROR: could not open output file from test.")
-        os.close(output_fd)
-        return -1
-    line = ""
-    while not done or more_to_read:
-        os.fsync(output_fd)
-        # Determine if we should display some output
-        elapsed_time = (time.time() - start_time)
-        if elapsed_time > seconds_between_status_updates:
-            start_time = time.time()
-            # If we've received output from the test since the last update, display a #
-            if pointer != pointer_at_last_user_update:
-                sys.stdout.write(":")
-            else:
-                sys.stdout.write(".")
-            pointer_at_last_user_update = pointer
-            sys.stdout.flush()
-        # Check if we're done
-        p.poll()
-        if not done and p.returncode != None:
-            if p.returncode < 0:
-                if not output_this_run:
-                    print("")
-                    output_this_run = True
-                write_screen_log("           ==> ERROR: test killed/crashed: " + str(p.returncode) + ".")
-            done = True
-        # Try reading
-        try:
-            read_output.seek(pointer)
-            char_read = read_output.read(1)
-        except IOError:
-            time.sleep(1)
-            continue
-        # If we got a full line then process it
-        if char_read == "\n":
-            # Look for failures and report them as such
-            match = re.search(".*(FAILED|ERROR).*", line)
-            if match:
-                if not output_this_run:
-                    print("")
-                    output_this_run = True
-                print("           ==> " + line.replace('\n', ''))
-            match = re.search(".*FAILED.*", line)
-            if match:
-                failures_this_run = failures_this_run + 1
-            match = re.search(".*(PASSED).*", line)
-            if match:
-                if not output_this_run:
-                    print("")
-                    output_this_run = True
-                print("               " + line.replace('\n', ''))
-            # Write it to the log
-            log_file.write("     " + line + "\n")
-            log_file.flush()
-            line = ""
-            pointer = pointer + 1
-        # If we are at the end of the file, then re-open it to get new data
-        elif char_read == "":
-            more_to_read = False
-            read_output.close()
-            time.sleep(1)
-            try:
-                os.fsync(output_fd)
-                read_output = open(output_name, 'r')
-                # See if there is more to read. This happens if the process ends and we have data left.
-                read_output.seek(pointer)
-                if read_output.read(1) != "":
-                    more_to_read = True
-            except IOError:
-                write_screen_log("\n           ==> ERROR: could not reopen output file from test.")
-                return -1
-        else:
-            line = line + char_read
-            pointer = pointer + 1
-    # Now we are done, so write out any remaining data in the file:
-    # This should only happen if the process exited with an error.
-    os.fsync(output_fd)
-    while read_output.read(1) != "":
-        log_file.write(read_output.read(1))
-    # Return the total number of failures
-    if (p.returncode == 0 and failures_this_run > 0):
-        write_screen_log("\n           ==> ERROR: Test returned 0, but number of FAILED lines reported is " + str(failures_this_run) + ".")
-        return failures_this_run
-    return p.returncode
 
+    test_exec_dir = os.path.dirname(current_directory + os.sep + test_dir_without_args)
+    if not os.path.exists(current_directory + os.sep + program_to_run):
+        os.write(output_fd, ("\n           ==> ERROR: test file (" + current_directory + os.sep + program_to_run + ") does not exist.  Failing test.\n").encode())
+        return -1, None
+
+    try:
+        if DEBUG: p = subprocess.Popen("", stderr=subprocess.STDOUT, stdout=subprocess.PIPE, shell=True, cwd=test_exec_dir)
+        else: p = subprocess.Popen(current_directory + os.sep + test_dir, stderr=output_fd, stdout=output_fd, shell=True, cwd=test_exec_dir)
+    except OSError as e:
+        os.write(output_fd, ("\n           ==> ERROR: failed to execute test. Failing test. : " + str(e) + "\n").encode())
+        return -1, None
+
+    # Wait for the process to complete or abort event
+    while p.poll() is None:
+        if abort_event.is_set():
+            p.kill()
+            os.write(output_fd, ("\n           ==> ERROR: test killed due to user interruption.\n").encode())
+            return -1, p.pid
+        time.sleep(0.1)
+
+    os.fsync(output_fd)
+
+    # Parse output for failures
+    try:
+        with open(output_name, 'r') as read_output:
+            for line in read_output:
+                if re.search(".*FAILED.*", line):
+                    failures_this_run += 1
+    except IOError:
+        os.write(output_fd, ("\n           ==> ERROR: could not read output file.\n").encode())
+        return -1, p.pid
+
+    if (p.returncode == 0 and failures_this_run > 0):
+        os.write(output_fd, ("\n           ==> ERROR: Test returned 0, but number of FAILED lines reported is " + str(failures_this_run) + ".\n").encode())
+        return failures_this_run, p.pid
+
+    return p.returncode, p.pid
+
+
+import multiprocessing
+import threading
+import concurrent.futures
+
+log_lock = threading.Lock()
+
+def process_test(test, current_directory, abort_event):
+    (test_name, test_dir) = test
+    start_time = time.time()
+
+    (output_fd, output_name) = tempfile.mkstemp()
+    if not os.path.exists(output_name):
+        return (test_name, test_dir, -1, 0, "", "could not create temporary file")
+
+    result, pid = run_test_checking_output(current_directory, test_dir, output_fd, output_name, abort_event)
+
+    run_time = (time.time() - start_time)
+
+    os.close(output_fd)
+
+    try:
+        with open(output_name, 'r') as f:
+            output_content = f.read()
+        os.remove(output_name)
+    except Exception as e:
+        output_content = "Failed to read output: " + str(e)
+
+    return (test_name, test_dir, result, run_time, output_content, pid)
 
 def run_tests(tests):
-    global curent_directory
-    global process_pid
-    # Run the tests
+    global current_directory
+    global log_file
     failures = 0
     previous_test = None
-    test_number = 1
-    for test in tests:
-        # Print the name of the test we're running and the time
-        (test_name, test_dir) = test
-        if test_dir != previous_test:
-            print("==========   " + test_dir)
-            log_file.write("========================================================================================\n")
-            log_file.write("========================================================================================\n")
-            log_file.write("(" + get_time() + ")     Running Tests: " + test_dir + "\n")
-            log_file.write("========================================================================================\n")
-            log_file.write("========================================================================================\n")
-            previous_test = test_dir
-        print("(" + get_time() + ")     BEGIN  " + test_name.ljust(40) + ": ", end='')
-        log_file.write("     ----------------------------------------------------------------------------------------\n")
-        log_file.write("     (" + get_time() + ")     Running Sub Test: " + test_name + "\n")
-        log_file.write("     ----------------------------------------------------------------------------------------\n")
-        log_file.flush()
-        sys.stdout.flush()
 
-        # Run the test
-        result = 0
-        start_time = time.time()
+    abort_event = threading.Event()
+    max_workers = multiprocessing.cpu_count()
+    write_screen_log("Using " + str(max_workers) + " worker threads for execution.")
+
+    futures = []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         try:
-            process_pid = 0
-            result = run_test_checking_output(current_directory, test_dir, log_file)
+            for test in tests:
+                futures.append(executor.submit(process_test, test, current_directory, abort_event))
+
+            test_number = 1
+            for future in concurrent.futures.as_completed(futures):
+                (test_name, test_dir, result, run_time, output_content, pid) = future.result()
+
+                with log_lock:
+                    log_file.write("========================================================================================\n")
+
+                    log_file.write("(" + get_time() + ")     Running Tests: " + test_dir + "\n")
+
+                    log_file.write("========================================================================================\n")
+
+                    print("(" + get_time() + ")     BEGIN  " + test_name.ljust(40) + ": ")
+                    log_file.write("     ----------------------------------------------------------------------------------------\n")
+                    log_file.write("     (" + get_time() + ")     Running Sub Test: " + test_name + "\n")
+                    log_file.write("     ----------------------------------------------------------------------------------------\n")
+
+                    # Write captured output
+                    for line in output_content.splitlines():
+                        log_file.write("     " + line + "\n")
+                        # Output key lines to screen
+                        if re.search(".*(FAILED|ERROR).*", line) or re.search(".*(PASSED).*", line):
+                            print("           ==> " + line.strip())
+
+                    if result == 0:
+                        print("(" + get_time() + ")     PASSED " + test_name.ljust(40) + ": (" + str(int(run_time)).rjust(3) + "s, test " + str(test_number).rjust(3) + os.sep + str(len(tests)) + ")")
+                    else:
+                        print("(" + get_time() + ")     FAILED " + test_name.ljust(40) + ": (" + str(int(run_time)).rjust(3) + "s, test " + str(test_number).rjust(3) + os.sep + str(len(tests)) + ")")
+
+                    log_file.write("     ----------------------------------------------------------------------------------------\n")
+
+                    if result != 0:
+                        log_file.write("  *******************************************************************************************\n")
+                        log_file.write("  *  (" + get_time() + ")     Test " + test_name + " ==> FAILED: " + str(result) + "\n")
+                        log_file.write("  *******************************************************************************************\n")
+                        failures += 1
+                    else:
+                        log_file.write("     (" + get_time() + ")     Test " + test_name + " passed in " + str(run_time) + "s\n")
+
+                    log_file.write("     ----------------------------------------------------------------------------------------\n\n")
+                    log_file.flush()
+                    sys.stdout.flush()
+                    test_number += 1
+
         except KeyboardInterrupt:
-            # Catch an interrupt from the user
-            write_screen_log("\nFAILED: Execution interrupted.  Killing test process, but not aborting full test run.")
-            os.kill(process_pid, 9)
-            if sys.version_info[0] < 3:
-                answer = raw_input("Abort all tests? (y/n)")
-            else:
-                answer = input("Abort all tests? (y/n)")
-            if answer.find("y") != -1:
-                write_screen_log("\nUser chose to abort all tests.")
+            write_screen_log("\nFAILED: Execution interrupted. Killing test processes and aborting full test run.")
+            abort_event.set()
+
+            # Wait a brief moment for threads to clean up
+            time.sleep(1)
+
+            # Print remaining outputs
+            with log_lock:
+                write_screen_log("\nUser chose to abort all tests. Collecting partial logs...")
+                for future in futures:
+                    if future.done():
+                        try:
+                            (test_name, test_dir, result, run_time, output_content, pid) = future.result()
+                            log_file.write("\n--- Interrupted Test: " + test_name + " ---\n")
+                            for line in output_content.splitlines():
+                                log_file.write("     " + line + "\n")
+                        except Exception:
+                            pass
                 log_file.close()
                 sys.exit(-1)
-            else:
-                write_screen_log("\nUser chose to continue with other tests. Reporting this test as failed.")
-                result = 1
-        run_time = (time.time() - start_time)
 
-        # Move print the finish status
-        if result == 0:
-            print("(" + get_time() + ")     PASSED " + test_name.ljust(40) + ": (" + str(int(run_time)).rjust(3) + "s, test " + str(test_number).rjust(3) + os.sep + str(len(tests)) + ")", end='')
-        else:
-            print("(" + get_time() + ")     FAILED " + test_name.ljust(40) + ": (" + str(int(run_time)).rjust(3) + "s, test " + str(test_number).rjust(3) + os.sep + str(len(tests)) + ")", end='')
-
-        test_number = test_number + 1
-        log_file.write("     ----------------------------------------------------------------------------------------\n")
-        log_file.flush()
-
-        print("")
-        if result != 0:
-            log_file.write("  *******************************************************************************************\n")
-            log_file.write("  *  (" + get_time() + ")     Test " + test_name + " ==> FAILED: " + str(result) + "\n")
-            log_file.write("  *******************************************************************************************\n")
-            failures = failures + 1
-        else:
-            log_file.write("     (" + get_time() + ")     Test " + test_name + " passed in " + str(run_time) + "s\n")
-
-        log_file.write("     ----------------------------------------------------------------------------------------\n")
-        log_file.write("\n")
     return failures
-
 
 # ########################
 # Begin OpenCL conformance run script
@@ -289,7 +248,7 @@ if len(sys.argv) < 2:
 current_directory = os.getcwd()
 # Open the log file
 for arg in sys.argv:
-    match = re.search("log=(\S+)", arg)
+    match = re.search("log=(\\S+)", arg)
     if match:
         log_file_name = match.group(1).rstrip('/') + os.sep + log_file_name
 try:
@@ -317,7 +276,7 @@ num_of_patterns_to_match = 0
 for arg in sys.argv[2:]:
     if arg in device_types:
         continue
-    if re.search("log=(\S+)", arg):
+    if re.search("log=(\\S+)", arg):
         continue
     num_of_patterns_to_match = num_of_patterns_to_match + 1
     found_it = False
